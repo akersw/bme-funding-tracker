@@ -210,85 +210,56 @@ export default function GrantTracker() {
   const saveTimer = useRef(null);
 
   // ── Save to Google Sheet ──────────────────────────────────────────────
-  const saveToSheet = useCallback((g) => {
-    console.log("saveToSheet called, count:", g.length, "url:", SCRIPT_URL ? "set" : "MISSING");
-    if (!SCRIPT_URL) {
-      console.warn("SCRIPT_URL is empty — save skipped");
-      return;
+const saveToSheet = useCallback(async (currentGrants) => {
+  if (!SCRIPT_URL) return;
+  setSaving(true);
+  try {
+    const response = await fetch(SCRIPT_URL, {
+      method: 'POST',
+      // REMOVE mode: 'no-cors'
+      redirect: 'follow', 
+      body: JSON.stringify({ action: 'save', grants: currentGrants })
+    });
+    
+    // Now you can actually read the response
+    const result = await response.json();
+    if (result.success) {
+      setSaveStatus('success');
     }
-    setSyncStatus("saving");
-    try { localStorage.setItem("bme-grants-fallback", JSON.stringify(g)); } catch {}
-
-    fetch(SCRIPT_URL, {
-      method: "POST",
-      redirect: "follow",
-      headers: { "Content-Type": "text/plain" },
-      body: JSON.stringify({ action: "save", grants: g }),
-    })
-      .then(r => r.text())
-      .then(text => {
-        console.log("Sheet response:", text);
-        let data;
-        try { data = JSON.parse(text); }
-        catch { throw new Error("Non-JSON: " + text.slice(0, 200)); }
-        if (data.success) {
-          setSyncStatus("saved");
-          setLastUpdated(new Date().toISOString());
-          if (saveTimer.current) clearTimeout(saveTimer.current);
-          saveTimer.current = setTimeout(() => setSyncStatus("idle"), 3000);
-        } else {
-          console.error("Sheet save error:", data.error);
-          setSyncStatus("error");
-        }
-      })
-      .catch(err => { console.error("saveToSheet error:", err); setSyncStatus("error"); });
-  }, []);
+  } catch (e) {
+    console.error("Save failed:", e);
+    setSaveStatus('error');
+  } finally {
+    setSaving(false);
+  }
+}, []);
 
   // ── Load from Google Sheet on mount ──────────────────────────────────
   useEffect(() => {
-    if (!SCRIPT_URL) {
-      console.warn("No SCRIPT_URL — loading sample grants");
-      setGrants(sampleGrants);
-      setLoading(false);
-      return;
-    }
+  if (!SCRIPT_URL) {
+    setGrants(sampleGrants);
+    setLoading(false);
+    return;
+  }
     console.log("Fetching from sheet...");
-    fetch(SCRIPT_URL, { redirect: "follow" })
-      .then(r => r.text())
-      .then(text => {
-        console.log("Sheet load response:", text.slice(0, 300));
-        let data;
-        try { data = JSON.parse(text); }
-        catch { throw new Error("Non-JSON: " + text.slice(0, 200)); }
-        if (data.success && Array.isArray(data.grants) && data.grants.length > 0) {
-          // Sanitize: skip blank rows, normalize deadline to YYYY-MM-DD
-          const clean = data.grants
-            .filter(g => g && g.id && g.title)
-            .map(g => ({
-              ...g,
-              deadline: normalizeDate(g.deadline),
-              category: g.category || "",
-            }));
-          console.log("Loaded grants:", clean.length, "of", data.grants.length);
-          setGrants(clean.length > 0 ? clean : sampleGrants);
-          setLastUpdated(new Date().toISOString());
-        } else {
-          console.log("Sheet empty — seeding defaults");
-          setGrants(sampleGrants);
-          setTimeout(() => saveToSheet(sampleGrants), 800);
-        }
-      })
-      .catch(err => {
-        console.error("Load error:", err);
-        try {
-          const raw = localStorage.getItem("bme-grants-fallback");
-          if (raw) { setGrants(JSON.parse(raw)); return; }
-        } catch {}
-        setGrants(sampleGrants);
-      })
-      .finally(() => setLoading(false));
-  }, [saveToSheet]);
-
+  fetch(SCRIPT_URL, { 
+    method: 'GET',
+    redirect: 'follow' // Crucial for Google Apps Script
+  })
+    .then(r => r.json())
+    .then(data => {
+      if (data.success && data.grants) {
+        setGrants(data.grants);
+      }
+    })
+    .catch((err) => {
+      console.error("Connection failed:", err);
+      // Fallback logic...
+    })
+    .finally(() => setLoading(false));
+}, [saveToSheet]);
+    
+    
   // ── CRUD handlers ─────────────────────────────────────────────────────
   const handleSave = () => {
     if (!form.title || !form.deadline) return;
