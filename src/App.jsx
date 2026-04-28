@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 
-const SCRIPT_URL = import.meta.env.VITE_GOOGLE_SCRIPT_URL || "";
+const SCRIPT_URL = import.meta.env.VITE_APPS_SCRIPT_URL || "";
 
 const sampleGrants = [
   // ─── NIH R01 New ──────────────────────────────────────────────────────
