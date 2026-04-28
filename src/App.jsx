@@ -153,6 +153,40 @@ export default function GrantTracker() {
   const [loading, setLoading] = useState(true);
   const saveTimer = useRef(null);
 
+  // ── Save grants to Google Sheet ─────────────────────────────
+  const saveToSheet = useCallback((g) => {
+    if (!SCRIPT_URL) return;
+    setSyncStatus("saving");
+    try { localStorage.setItem("bme-grants-fallback", JSON.stringify(g)); } catch {}
+
+    fetch(SCRIPT_URL, {
+      method: "POST",
+      redirect: "follow",
+      headers: { "Content-Type": "text/plain" },
+      body: JSON.stringify({ action: "save", grants: g }),
+    })
+      .then(r => {
+        const ct = r.headers.get("content-type") || "";
+        if (!ct.includes("application/json") && !ct.includes("text/plain")) {
+          throw new Error("Unexpected content-type: " + ct);
+        }
+        return r.text();
+      })
+      .then(text => {
+        const data = JSON.parse(text);
+        if (data.success) {
+          setSyncStatus("saved");
+          setLastUpdated(new Date().toISOString());
+          if (saveTimer.current) clearTimeout(saveTimer.current);
+          saveTimer.current = setTimeout(() => setSyncStatus("idle"), 3000);
+        } else {
+          console.error("Save error from sheet:", data.error);
+          setSyncStatus("error");
+        }
+      })
+      .catch(err => { console.error("saveToSheet fetch error:", err); setSyncStatus("error"); });
+  }, []);
+
   // ── Fetch grants from Google Sheet on load ──────────────────
   useEffect(() => {
     if (!SCRIPT_URL) {
@@ -160,20 +194,25 @@ export default function GrantTracker() {
       setLoading(false);
       return;
     }
-    fetch(SCRIPT_URL)
-      .then(r => r.json())
-      .then(data => {
-        if (data.success && data.grants.length > 0) {
+    fetch(SCRIPT_URL, { redirect: "follow" })
+      .then(r => r.text())
+      .then(text => {
+        let data;
+        try { data = JSON.parse(text); }
+        catch { throw new Error("Non-JSON response: " + text.slice(0, 200)); }
+
+        if (data.success && Array.isArray(data.grants) && data.grants.length > 0) {
           setGrants(data.grants);
           setLastUpdated(new Date().toISOString());
         } else {
-          // Sheet is empty — seed with sample grants
+          // Sheet is empty — display and seed default grants
+          console.log("Sheet empty — seeding with default grants");
           setGrants(sampleGrants);
-          saveToSheet(sampleGrants);
+          setTimeout(() => saveToSheet(sampleGrants), 500); // slight delay to ensure saveToSheet is ready
         }
       })
-      .catch(() => {
-        // Fallback to localStorage if sheet unreachable
+      .catch(err => {
+        console.error("Load error:", err);
         try {
           const raw = localStorage.getItem("bme-grants-fallback");
           if (raw) setGrants(JSON.parse(raw));
@@ -181,33 +220,7 @@ export default function GrantTracker() {
         } catch { setGrants(sampleGrants); }
       })
       .finally(() => setLoading(false));
-  }, []);
-
-  // ── Save grants to Google Sheet ─────────────────────────────
-  const saveToSheet = useCallback((g) => {
-    if (!SCRIPT_URL) return;
-    setSyncStatus("saving");
-    // Also cache locally as fallback
-    try { localStorage.setItem("bme-grants-fallback", JSON.stringify(g)); } catch {}
-
-    fetch(SCRIPT_URL, {
-      method: "POST",
-      headers: { "Content-Type": "text/plain" }, // Apps Script requires text/plain for no CORS preflight
-      body: JSON.stringify({ action: "save", grants: g }),
-    })
-      .then(r => r.json())
-      .then(data => {
-        if (data.success) {
-          setSyncStatus("saved");
-          setLastUpdated(new Date().toISOString());
-          if (saveTimer.current) clearTimeout(saveTimer.current);
-          saveTimer.current = setTimeout(() => setSyncStatus("idle"), 3000);
-        } else {
-          setSyncStatus("error");
-        }
-      })
-      .catch(() => setSyncStatus("error"));
-  }, []);
+  }, [saveToSheet]);
 
   const handleSave = () => {
     if (!form.title || !form.deadline) return;
