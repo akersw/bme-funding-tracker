@@ -110,8 +110,6 @@ const sampleGrants = [
   { id:"big-jun27",   category:"Engineering & Instrumentation",   title:"NIH S10 Basic Instrumentation Grant (BIG) – 2027", agency:"NIH / ORIP", mechanism:"S10 Instrumentation (PAR-24-326) – Limited Competition", deadline:"2027-06-01", amount:"Up to $350,000; 1 year; no indirect costs", piEligible:"Institutions that received <$500,001 total in S10 awards in FY2024–2026", notes:"PAR-24-326. LIMITED COMPETITION. Eligibility window shifts — UTSW must have received <$500,001 in S10 awards in FY2024–2026. Only ONE BIG application per receipt date. Verify eligibility before preparing.", url:"https://grants.nih.gov/grants/guide/pa-files/PAR-24-326.html" },
 ];
 
-const agencyColors = { NIH:"#4f86c6", NSF:"#6aaa64", DOD:"#c97b3a", HHMI:"#9b6bc4", AHA:"#c94a4a", Other:"#7a9a8a" };
-
 const CATEGORIES = [
   "Cancer",
   "Neuroscience",
@@ -140,6 +138,8 @@ const categoryColors = {
   "General / Unrestricted":          { color:"#8ab4d4", bg:"#152030" },
 };
 
+const agencyColors = { NIH:"#4f86c6", NSF:"#6aaa64", DOD:"#c97b3a", HHMI:"#9b6bc4", AHA:"#c94a4a", Other:"#7a9a8a" };
+
 function getCategoryStyle(cat) {
   return categoryColors[cat] || { color:"#8ab4d4", bg:"#152030" };
 }
@@ -151,9 +151,29 @@ function getAgencyColor(agency = "") {
   return agencyColors.Other;
 }
 
+// Normalize various date formats to YYYY-MM-DD
+function normalizeDate(raw) {
+  if (!raw) return "";
+  const s = String(raw).trim();
+  // Already correct format
+  if (s.match(/^\d{4}-\d{2}-\d{2}$/)) return s;
+  // Try parsing as a JS date (handles M/D/YYYY, Month D YYYY, etc.)
+  const d = new Date(s);
+  if (!isNaN(d.getTime())) {
+    const yr = d.getFullYear();
+    const mo = String(d.getMonth() + 1).padStart(2, "0");
+    const dy = String(d.getDate()).padStart(2, "0");
+    return `${yr}-${mo}-${dy}`;
+  }
+  return s; // return as-is if unparseable — getDaysUntil will return 9999
+}
+
 function getDaysUntil(dateStr) {
+  if (!dateStr || typeof dateStr !== "string" || !dateStr.match(/^\d{4}-\d{2}-\d{2}$/)) return 9999;
   const today = new Date(); today.setHours(0,0,0,0);
-  return Math.round((new Date(dateStr + "T00:00:00") - today) / 86400000);
+  const d = new Date(dateStr + "T00:00:00");
+  if (isNaN(d.getTime())) return 9999;
+  return Math.round((d - today) / 86400000);
 }
 
 function urgencyLabel(days) {
@@ -164,7 +184,10 @@ function urgencyLabel(days) {
 }
 
 function formatDate(dateStr) {
-  return new Date(dateStr + "T00:00:00").toLocaleDateString("en-US", { month:"long", day:"numeric", year:"numeric" });
+  if (!dateStr) return "No date";
+  const d = new Date(dateStr + "T00:00:00");
+  if (isNaN(d.getTime())) return dateStr; // show raw string if unparseable
+  return d.toLocaleDateString("en-US", { month:"long", day:"numeric", year:"numeric" });
 }
 
 const emptyForm = { title:"", agency:"", mechanism:"", deadline:"", amount:"", piEligible:"", notes:"", url:"", category:"" };
@@ -182,14 +205,17 @@ export default function GrantTracker() {
   const [expandedId, setExpandedId] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [windowMonths, setWindowMonths] = useState(3);
-  const [syncStatus, setSyncStatus] = useState("idle"); // idle | saving | saved | error
+  const [syncStatus, setSyncStatus] = useState("idle");
   const [loading, setLoading] = useState(true);
   const saveTimer = useRef(null);
 
-  // ── Save grants to Google Sheet ─────────────────────────────
+  // ── Save to Google Sheet ──────────────────────────────────────────────
   const saveToSheet = useCallback((g) => {
-    console.log("saveToSheet called, grants count:", g.length, "SCRIPT_URL:", SCRIPT_URL);    
-    if (!SCRIPT_URL) return;
+    console.log("saveToSheet called, count:", g.length, "url:", SCRIPT_URL ? "set" : "MISSING");
+    if (!SCRIPT_URL) {
+      console.warn("SCRIPT_URL is empty — save skipped");
+      return;
+    }
     setSyncStatus("saving");
     try { localStorage.setItem("bme-grants-fallback", JSON.stringify(g)); } catch {}
 
@@ -199,79 +225,92 @@ export default function GrantTracker() {
       headers: { "Content-Type": "text/plain" },
       body: JSON.stringify({ action: "save", grants: g }),
     })
-      .then(r => {
-        const ct = r.headers.get("content-type") || "";
-        if (!ct.includes("application/json") && !ct.includes("text/plain")) {
-          throw new Error("Unexpected content-type: " + ct);
-        }
-        return r.text();
-      })
+      .then(r => r.text())
       .then(text => {
-        console.log("RAW RESPONSE:", text);
-        const data = JSON.parse(text);
+        console.log("Sheet response:", text);
+        let data;
+        try { data = JSON.parse(text); }
+        catch { throw new Error("Non-JSON: " + text.slice(0, 200)); }
         if (data.success) {
           setSyncStatus("saved");
           setLastUpdated(new Date().toISOString());
           if (saveTimer.current) clearTimeout(saveTimer.current);
           saveTimer.current = setTimeout(() => setSyncStatus("idle"), 3000);
         } else {
-          console.error("Save error from sheet:", data.error);
+          console.error("Sheet save error:", data.error);
           setSyncStatus("error");
         }
       })
-      .catch(err => { console.error("saveToSheet fetch error:", err); setSyncStatus("error"); });
+      .catch(err => { console.error("saveToSheet error:", err); setSyncStatus("error"); });
   }, []);
 
-  // ── Fetch grants from Google Sheet on load ──────────────────
+  // ── Load from Google Sheet on mount ──────────────────────────────────
   useEffect(() => {
     if (!SCRIPT_URL) {
+      console.warn("No SCRIPT_URL — loading sample grants");
       setGrants(sampleGrants);
       setLoading(false);
       return;
     }
+    console.log("Fetching from sheet...");
     fetch(SCRIPT_URL, { redirect: "follow" })
       .then(r => r.text())
       .then(text => {
+        console.log("Sheet load response:", text.slice(0, 300));
         let data;
         try { data = JSON.parse(text); }
-        catch { throw new Error("Non-JSON response: " + text.slice(0, 200)); }
-
+        catch { throw new Error("Non-JSON: " + text.slice(0, 200)); }
         if (data.success && Array.isArray(data.grants) && data.grants.length > 0) {
-          setGrants(data.grants);
+          // Sanitize: skip blank rows, normalize deadline to YYYY-MM-DD
+          const clean = data.grants
+            .filter(g => g && g.id && g.title)
+            .map(g => ({
+              ...g,
+              deadline: normalizeDate(g.deadline),
+              category: g.category || "",
+            }));
+          console.log("Loaded grants:", clean.length, "of", data.grants.length);
+          setGrants(clean.length > 0 ? clean : sampleGrants);
           setLastUpdated(new Date().toISOString());
         } else {
-          // Sheet is empty — display and seed default grants
-          console.log("Sheet empty — seeding with default grants");
+          console.log("Sheet empty — seeding defaults");
           setGrants(sampleGrants);
-          setTimeout(() => saveToSheet(sampleGrants), 500); // slight delay to ensure saveToSheet is ready
+          setTimeout(() => saveToSheet(sampleGrants), 800);
         }
       })
       .catch(err => {
         console.error("Load error:", err);
         try {
           const raw = localStorage.getItem("bme-grants-fallback");
-          if (raw) setGrants(JSON.parse(raw));
-          else setGrants(sampleGrants);
-        } catch { setGrants(sampleGrants); }
+          if (raw) { setGrants(JSON.parse(raw)); return; }
+        } catch {}
+        setGrants(sampleGrants);
       })
       .finally(() => setLoading(false));
   }, [saveToSheet]);
 
+  // ── CRUD handlers ─────────────────────────────────────────────────────
   const handleSave = () => {
     if (!form.title || !form.deadline) return;
     const updated = editingId
       ? grants.map(g => g.id === editingId ? { ...form, id: editingId } : g)
       : [...grants, { ...form, id: Date.now().toString() }];
-    setGrants(updated); saveToSheet(updated); setForm(emptyForm); setShowForm(false); setEditingId(null);
+    setGrants(updated);
+    saveToSheet(updated);
+    setForm(emptyForm);
+    setShowForm(false);
+    setEditingId(null);
   };
 
   const handleEdit = (g) => { setForm({ ...g }); setEditingId(g.id); setShowForm(true); setExpandedId(null); };
   const handleDuplicate = (g) => { setForm({ ...g, id: Date.now().toString(), title: g.title + " (Copy)", deadline: "" }); setEditingId(null); setShowForm(true); setExpandedId(null); };
   const handleDelete = (id) => { const u = grants.filter(g => g.id !== id); setGrants(u); saveToSheet(u); setConfirmDelete(null); };
 
+  // ── Filtering / sorting ───────────────────────────────────────────────
   const windowEnd = new Date(); windowEnd.setDate(windowEnd.getDate() + windowMonths * 30);
   const agencies = ["All", ...Array.from(new Set(grants.map(g => g.agency?.split(/[\s/]/)[0]).filter(Boolean)))];
   const usedCategories = ["All", ...CATEGORIES.filter(c => grants.some(g => g.category === c))];
+  const urgentCount = grants.filter(g => { const d = getDaysUntil(g.deadline); return d >= 0 && d <= 14; }).length;
 
   const filtered = grants
     .filter(g => { const d = getDaysUntil(g.deadline); return d >= -7 && new Date(g.deadline) <= windowEnd; })
@@ -280,15 +319,15 @@ export default function GrantTracker() {
     .filter(g => [g.title, g.agency, g.mechanism, g.notes, g.category].join(" ").toLowerCase().includes(search.toLowerCase()))
     .sort((a, b) => sortBy === "deadline" ? new Date(a.deadline) - new Date(b.deadline) : sortBy === "agency" ? a.agency?.localeCompare(b.agency) : a.title?.localeCompare(b.title));
 
-  const urgentCount = filtered.filter(g => { const d = getDaysUntil(g.deadline); return d >= 0 && d <= 14; }).length;
-
+  // ── Styles ────────────────────────────────────────────────────────────
   const selStyle = { background:"#0d1f35", border:"1px solid #1e3a5f", borderRadius:7, color:"#c9d8ed", padding:"7px 14px", fontSize:13, fontFamily:"inherit", outline:"none" };
   const inpStyle = (extra={}) => ({ background:"#0d1828", border:"1px solid #1e3a5f", borderRadius:8, color:"#c9d8ed", padding:"9px 12px", fontSize:13, fontFamily:"inherit", outline:"none", width:"100%", boxSizing:"border-box", colorScheme:"dark", ...extra });
   const btnStyle = (bg, br, tc) => ({ background:bg, border:`1px solid ${br}`, borderRadius:8, color:tc, padding:"9px 22px", cursor:"pointer", fontFamily:"inherit", fontSize:14 });
 
   return (
     <div style={{ minHeight:"100vh", background:"#0d1117", color:"#e6edf3", fontFamily:"'Georgia', serif" }}>
-      {/* Header */}
+
+      {/* ── Header ── */}
       <div style={{ background:"linear-gradient(135deg,#0a1628 0%,#112244 60%,#0d1a35 100%)", borderBottom:"1px solid #1e3a5f", padding:"28px 40px 24px", position:"sticky", top:0, zIndex:100, boxShadow:"0 4px 24px rgba(0,0,0,.5)" }}>
         <div style={{ maxWidth:1100, margin:"0 auto" }}>
           <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", flexWrap:"wrap", gap:16 }}>
@@ -302,8 +341,10 @@ export default function GrantTracker() {
               <button onClick={() => { setForm(emptyForm); setEditingId(null); setShowForm(true); }} style={{ background:"#1a4a8a", border:"1px solid #2a6ac0", borderRadius:8, color:"#a8d0ff", padding:"8px 20px", cursor:"pointer", fontSize:14, fontFamily:"inherit" }}>+ Add Opportunity</button>
             </div>
           </div>
+
+          {/* Controls */}
           <div style={{ display:"flex", gap:12, marginTop:20, flexWrap:"wrap", alignItems:"center" }}>
-            <input placeholder="Search grants..." value={search} onChange={e => setSearch(e.target.value)} style={{ ...selStyle, width:200 }} />
+            <input placeholder="Search grants..." value={search} onChange={e => setSearch(e.target.value)} style={{ ...selStyle, width:180 }} />
             <select value={filterAgency} onChange={e => setFilterAgency(e.target.value)} style={selStyle}>{agencies.map(a => <option key={a}>{a}</option>)}</select>
             <select value={filterCategory} onChange={e => setFilterCategory(e.target.value)} style={selStyle}>{usedCategories.map(c => <option key={c}>{c}</option>)}</select>
             <select value={sortBy} onChange={e => setSortBy(e.target.value)} style={selStyle}>
@@ -320,24 +361,26 @@ export default function GrantTracker() {
               <option value={36}>Window: 36 months</option>
             </select>
             <div style={{ fontSize:11, marginLeft:"auto", display:"flex", alignItems:"center", gap:8 }}>
-              {syncStatus === "saving" && <span style={{ color:"#ffd166" }}>⟳ Saving to Sheet…</span>}
-              {syncStatus === "saved"  && <span style={{ color:"#6aaa64" }}>✓ Saved to Sheet</span>}
-              {syncStatus === "error"  && <span style={{ color:"#ff6b6b" }}>⚠ Save failed — check connection</span>}
-              {syncStatus === "idle" && lastUpdated && <span style={{ color:"#4a7a9b" }}>Last synced: {new Date(lastUpdated).toLocaleString()}</span>}
               {loading && <span style={{ color:"#5b8fc9" }}>Loading from Sheet…</span>}
+              {!loading && syncStatus === "saving" && <span style={{ color:"#ffd166" }}>⟳ Saving to Sheet…</span>}
+              {!loading && syncStatus === "saved"  && <span style={{ color:"#6aaa64" }}>✓ Saved to Sheet</span>}
+              {!loading && syncStatus === "error"  && <span style={{ color:"#ff6b6b" }}>⚠ Save failed — check connection</span>}
+              {!loading && syncStatus === "idle" && lastUpdated && <span style={{ color:"#4a7a9b" }}>Last synced: {new Date(lastUpdated).toLocaleString()}</span>}
             </div>
           </div>
         </div>
       </div>
 
+      {/* ── Main content ── */}
       <div style={{ maxWidth:1100, margin:"0 auto", padding:"32px 40px" }}>
-        {/* Summary */}
+
+        {/* Summary stats */}
         <div style={{ display:"flex", gap:16, marginBottom:28, flexWrap:"wrap" }}>
           {[
             { label:"Showing", value:`${filtered.length} opportunities`, color:"#5b8fc9" },
             { label:"Within 14 days", value:filtered.filter(g => { const d=getDaysUntil(g.deadline); return d>=0&&d<=14; }).length, color:"#ff6b6b" },
             { label:"Within 30 days", value:filtered.filter(g => { const d=getDaysUntil(g.deadline); return d>=0&&d<=30; }).length, color:"#ffd166" },
-            { label:`30d+`, value:filtered.filter(g => getDaysUntil(g.deadline)>30).length, color:"#6aaa64" },
+            { label:"30d+", value:filtered.filter(g => getDaysUntil(g.deadline)>30).length, color:"#6aaa64" },
           ].map(s => (
             <div key={s.label} style={{ background:"#111c2e", border:"1px solid #1e3a5f", borderRadius:10, padding:"12px 20px", minWidth:130 }}>
               <div style={{ fontSize:11, color:"#4a7a9b", textTransform:"uppercase", letterSpacing:"0.1em" }}>{s.label}</div>
@@ -346,6 +389,7 @@ export default function GrantTracker() {
           ))}
         </div>
 
+        {/* Grant cards */}
         {filtered.length === 0
           ? <div style={{ textAlign:"center", color:"#4a7a9b", padding:"60px 0", fontSize:16 }}>No grant opportunities in the selected window.<br /><span style={{ fontSize:13 }}>Expand the time window or add a new opportunity.</span></div>
           : (
@@ -355,11 +399,20 @@ export default function GrantTracker() {
                 const urgency = urgencyLabel(days);
                 const isExpanded = expandedId === grant.id;
                 const ac = getAgencyColor(grant.agency);
+                const cs = grant.category ? getCategoryStyle(grant.category) : null;
                 return (
                   <div key={grant.id} style={{ background:"#111c2e", border:"1px solid #1e3a5f", borderLeft:`4px solid ${ac}`, borderRadius:12, overflow:"hidden", boxShadow:isExpanded ? `0 0 0 1px ${ac}44` : "none" }}>
-                    <div onClick={() => setExpandedId(isExpanded ? null : grant.id)} style={{ padding:"18px 22px", cursor:"pointer", display:"flex", alignItems:"center", gap:16, flexWrap:"wrap" }}>
-                      <div style={{ background:ac+"22", border:`1px solid ${ac}55`, borderRadius:6, padding:"3px 10px", fontSize:11, color:ac, letterSpacing:"0.08em", textTransform:"uppercase", whiteSpace:"nowrap" }}>{grant.agency?.split(/[\s/]/)[0] || "—"}</div>
-                      {grant.category && (() => { const cs = getCategoryStyle(grant.category); return <div style={{ background:cs.bg, border:`1px solid ${cs.color}55`, borderRadius:6, padding:"3px 10px", fontSize:11, color:cs.color, whiteSpace:"nowrap" }}>{grant.category}</div>; })()}
+
+                    {/* Card row */}
+                    <div onClick={() => setExpandedId(isExpanded ? null : grant.id)} style={{ padding:"18px 22px", cursor:"pointer", display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
+                      <div style={{ background:ac+"22", border:`1px solid ${ac}55`, borderRadius:6, padding:"3px 10px", fontSize:11, color:ac, letterSpacing:"0.08em", textTransform:"uppercase", whiteSpace:"nowrap" }}>
+                        {grant.agency?.split(/[\s/]/)[0] || "—"}
+                      </div>
+                      {cs && (
+                        <div style={{ background:cs.bg, border:`1px solid ${cs.color}55`, borderRadius:6, padding:"3px 10px", fontSize:11, color:cs.color, whiteSpace:"nowrap" }}>
+                          {grant.category}
+                        </div>
+                      )}
                       <div style={{ flex:1, minWidth:200 }}>
                         <div style={{ fontSize:16, color:"#d4e4f9" }}>{grant.title}</div>
                         {grant.mechanism && <div style={{ fontSize:12, color:"#5b8fc9", marginTop:2 }}>{grant.mechanism}{grant.agency ? ` · ${grant.agency}` : ""}</div>}
@@ -373,10 +426,18 @@ export default function GrantTracker() {
                       </div>
                       <div style={{ color:"#4a7a9b", fontSize:18 }}>{isExpanded ? "▲" : "▼"}</div>
                     </div>
+
+                    {/* Expanded details */}
                     {isExpanded && (
                       <div style={{ borderTop:"1px solid #1e3a5f", padding:"18px 22px", background:"#0d1828" }}>
                         <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"12px 32px", marginBottom:14 }}>
-                          {[["Full Agency",grant.agency],["Mechanism",grant.mechanism],["Award Amount",grant.amount],["PI Eligibility",grant.piEligible],["Category",grant.category]].map(([label,val]) => val ? (
+                          {[
+                            ["Full Agency", grant.agency],
+                            ["Mechanism", grant.mechanism],
+                            ["Award Amount", grant.amount],
+                            ["PI Eligibility", grant.piEligible],
+                            ["Category", grant.category],
+                          ].map(([label, val]) => val ? (
                             <div key={label}>
                               <div style={{ fontSize:10, letterSpacing:"0.12em", textTransform:"uppercase", color:"#4a7a9b", marginBottom:2 }}>{label}</div>
                               <div style={{ fontSize:14, color:"#c9d8ed" }}>{val}</div>
@@ -405,6 +466,7 @@ export default function GrantTracker() {
         }
       </div>
 
+      {/* ── Confirm delete ── */}
       {confirmDelete && (
         <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.7)", zIndex:200, display:"flex", alignItems:"center", justifyContent:"center" }}>
           <div style={{ background:"#111c2e", border:"1px solid #c94a4a", borderRadius:14, padding:"32px 36px", maxWidth:380, textAlign:"center" }}>
@@ -418,32 +480,70 @@ export default function GrantTracker() {
         </div>
       )}
 
+      {/* ── Add / Edit modal ── */}
       {showForm && (
         <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.75)", zIndex:200, display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
           <div style={{ background:"#0f1c30", border:"1px solid #1e3a5f", borderRadius:16, padding:"32px 36px", width:"100%", maxWidth:620, maxHeight:"90vh", overflowY:"auto" }}>
             <h2 style={{ margin:"0 0 22px", fontSize:20, color:"#d4e4f9", fontWeight:"normal" }}>{editingId ? "Edit Funding Opportunity" : "Add Funding Opportunity"}</h2>
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14 }}>
-              {[
-                { key:"title", label:"Title *", placeholder:"e.g. NIH R01 – Neural Prosthetics", full:true },
-                { key:"agency", label:"Funding Agency *", placeholder:"e.g. NIH / NIBIB" },
-                { key:"mechanism", label:"Mechanism", placeholder:"e.g. R01, CAREER, R21" },
-                { key:"deadline", label:"Deadline *", type:"date" },
-                { key:"amount", label:"Award Amount", placeholder:"e.g. $500,000" },
-                { key:"piEligible", label:"PI Eligibility", placeholder:"e.g. Early-career faculty" },
-                { key:"url", label:"URL / FOA Link", placeholder:"https://...", full:true },
-                { key:"notes", label:"Notes", placeholder:"LOI dates, special requirements…", full:true, area:true },
-                { key:"category", label:"Category", placeholder:"Select a category", full:true, select:true },
-              ].map(field => (
-                <div key={field.key} style={{ gridColumn:field.full ? "1 / -1" : "auto" }}>
-                  <label style={{ fontSize:11, color:"#4a7a9b", textTransform:"uppercase", letterSpacing:"0.1em", display:"block", marginBottom:5 }}>{field.label}</label>
-                  {field.area
-                    ? <textarea value={form[field.key]} onChange={e => setForm(f => ({ ...f, [field.key]:e.target.value }))} placeholder={field.placeholder} rows={3} style={{ ...inpStyle(), resize:"vertical" }} />
-                    : field.select
-                    ? <select value={form[field.key]} onChange={e => setForm(f => ({ ...f, [field.key]:e.target.value }))} style={{ ...inpStyle(), cursor:"pointer" }}><option value="">— Select category —</option>{CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}</select>
-                    : <input type={field.type || "text"} value={form[field.key]} onChange={e => setForm(f => ({ ...f, [field.key]:e.target.value }))} placeholder={field.placeholder} style={inpStyle()} />
-                  }
-                </div>
-              ))}
+
+              {/* Title */}
+              <div style={{ gridColumn:"1 / -1" }}>
+                <label style={{ fontSize:11, color:"#4a7a9b", textTransform:"uppercase", letterSpacing:"0.1em", display:"block", marginBottom:5 }}>Title *</label>
+                <input value={form.title} onChange={e => setForm(f => ({ ...f, title:e.target.value }))} placeholder="e.g. NIH R01 – Neural Prosthetics" style={inpStyle()} />
+              </div>
+
+              {/* Agency */}
+              <div>
+                <label style={{ fontSize:11, color:"#4a7a9b", textTransform:"uppercase", letterSpacing:"0.1em", display:"block", marginBottom:5 }}>Funding Agency *</label>
+                <input value={form.agency} onChange={e => setForm(f => ({ ...f, agency:e.target.value }))} placeholder="e.g. NIH / NIBIB" style={inpStyle()} />
+              </div>
+
+              {/* Mechanism */}
+              <div>
+                <label style={{ fontSize:11, color:"#4a7a9b", textTransform:"uppercase", letterSpacing:"0.1em", display:"block", marginBottom:5 }}>Mechanism</label>
+                <input value={form.mechanism} onChange={e => setForm(f => ({ ...f, mechanism:e.target.value }))} placeholder="e.g. R01, CAREER, R21" style={inpStyle()} />
+              </div>
+
+              {/* Deadline */}
+              <div>
+                <label style={{ fontSize:11, color:"#4a7a9b", textTransform:"uppercase", letterSpacing:"0.1em", display:"block", marginBottom:5 }}>Deadline *</label>
+                <input type="date" value={form.deadline} onChange={e => setForm(f => ({ ...f, deadline:e.target.value }))} style={inpStyle()} />
+              </div>
+
+              {/* Amount */}
+              <div>
+                <label style={{ fontSize:11, color:"#4a7a9b", textTransform:"uppercase", letterSpacing:"0.1em", display:"block", marginBottom:5 }}>Award Amount</label>
+                <input value={form.amount} onChange={e => setForm(f => ({ ...f, amount:e.target.value }))} placeholder="e.g. $500,000" style={inpStyle()} />
+              </div>
+
+              {/* PI Eligibility */}
+              <div>
+                <label style={{ fontSize:11, color:"#4a7a9b", textTransform:"uppercase", letterSpacing:"0.1em", display:"block", marginBottom:5 }}>PI Eligibility</label>
+                <input value={form.piEligible} onChange={e => setForm(f => ({ ...f, piEligible:e.target.value }))} placeholder="e.g. Early-career faculty" style={inpStyle()} />
+              </div>
+
+              {/* Category */}
+              <div>
+                <label style={{ fontSize:11, color:"#4a7a9b", textTransform:"uppercase", letterSpacing:"0.1em", display:"block", marginBottom:5 }}>Category</label>
+                <select value={form.category} onChange={e => setForm(f => ({ ...f, category:e.target.value }))} style={{ ...inpStyle(), cursor:"pointer" }}>
+                  <option value="">— Select category —</option>
+                  {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
+
+              {/* URL */}
+              <div style={{ gridColumn:"1 / -1" }}>
+                <label style={{ fontSize:11, color:"#4a7a9b", textTransform:"uppercase", letterSpacing:"0.1em", display:"block", marginBottom:5 }}>URL / FOA Link</label>
+                <input value={form.url} onChange={e => setForm(f => ({ ...f, url:e.target.value }))} placeholder="https://..." style={inpStyle()} />
+              </div>
+
+              {/* Notes */}
+              <div style={{ gridColumn:"1 / -1" }}>
+                <label style={{ fontSize:11, color:"#4a7a9b", textTransform:"uppercase", letterSpacing:"0.1em", display:"block", marginBottom:5 }}>Notes</label>
+                <textarea value={form.notes} onChange={e => setForm(f => ({ ...f, notes:e.target.value }))} placeholder="LOI dates, special requirements…" rows={3} style={{ ...inpStyle(), resize:"vertical" }} />
+              </div>
+
             </div>
             <div style={{ display:"flex", gap:12, marginTop:22, justifyContent:"flex-end" }}>
               <button onClick={() => { setShowForm(false); setForm(emptyForm); setEditingId(null); }} style={btnStyle("#0d1828","#1e3a5f","#8ab4d4")}>Cancel</button>
@@ -454,6 +554,7 @@ export default function GrantTracker() {
           </div>
         </div>
       )}
+
     </div>
   );
 }
