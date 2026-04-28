@@ -216,7 +216,6 @@ const saveToSheet = useCallback(async (currentGrants) => {
   try {
     const response = await fetch(SCRIPT_URL, {
       method: 'POST',
-      // REMOVE mode: 'no-cors'
       redirect: 'follow', 
       body: JSON.stringify({ action: 'save', grants: currentGrants })
     });
