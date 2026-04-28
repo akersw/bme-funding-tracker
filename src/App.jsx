@@ -188,6 +188,7 @@ export default function GrantTracker() {
 
   // ── Save grants to Google Sheet ─────────────────────────────
   const saveToSheet = useCallback((g) => {
+    console.log("saveToSheet called, grants count:", g.length, "SCRIPT_URL:", SCRIPT_URL);    
     if (!SCRIPT_URL) return;
     setSyncStatus("saving");
     try { localStorage.setItem("bme-grants-fallback", JSON.stringify(g)); } catch {}
@@ -206,6 +207,7 @@ export default function GrantTracker() {
         return r.text();
       })
       .then(text => {
+        console.log("RAW RESPONSE:", text);
         const data = JSON.parse(text);
         if (data.success) {
           setSyncStatus("saved");
