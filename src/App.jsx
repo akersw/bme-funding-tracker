@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 
 const SCRIPT_URL = import.meta.env.VITE_APPS_SCRIPT_URL || "";
+// Use local proxy on Vercel to avoid CORS; call Google directly in local dev
+const API_URL = window.location.hostname === "localhost" ? SCRIPT_URL : "/api/grants";
 
 const sampleGrants = [
   // ─── NIH R01 New ──────────────────────────────────────────────────────
@@ -211,7 +213,7 @@ export default function GrantTracker() {
     try { localStorage.setItem("bme-grants-fallback", JSON.stringify(g)); } catch {}
     if (!SCRIPT_URL) return;
     setSyncStatus("saving");
-    fetch(SCRIPT_URL, {
+    fetch(API_URL, {
       method: "POST",
       redirect: "follow",
       headers: { "Content-Type": "text/plain" },
@@ -243,7 +245,7 @@ export default function GrantTracker() {
       setLoading(false);
       return;
     }
-    fetch(SCRIPT_URL, { redirect: "follow" })
+    fetch(API_URL, { redirect: "follow" })
       .then(r => r.text())
       .then(text => {
         const data = JSON.parse(text);
