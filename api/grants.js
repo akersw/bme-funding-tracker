@@ -4,7 +4,7 @@
 // Place this file at: api/grants.js  (in your project root, NOT inside src/)
 
 export default async function handler(req, res) {
-  const SCRIPT_URL = process.env.VITE_GOOGLE_SCRIPT_URL;
+  const SCRIPT_URL = process.env.VITE_APPS_SCRIPT_URL;
 
   if (!SCRIPT_URL) {
     return res.status(500).json({ success: false, error: "SCRIPT_URL not configured on server" });
