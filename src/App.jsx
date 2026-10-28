@@ -189,7 +189,17 @@ function formatDate(dateStr) {
   return d.toLocaleDateString("en-US", { month:"long", day:"numeric", year:"numeric" });
 }
 
-const emptyForm = { title:"", agency:"", mechanism:"", deadline:"", amount:"", piEligible:"", notes:"", url:"", category:"" };
+const emptyForm = { title:"", agency:"", mechanism:"", deadline:"", amount:"", piEligible:"", notes:"", url:"", category:"", source:"" };
+
+// Badge for rows added by the daily auto-import (Code.gs v2)
+const sourceBadges = {
+  "recurring":  { label:"Projected",  title:"Auto-generated from a recurring cycle — confirm in the active NOFO", color:"#c9b8ff", bg:"#221a3a" },
+  "grants.gov": { label:"Grants.gov", title:"Auto-imported from Grants.gov — verify details in the NOFO", color:"#7fd8c8", bg:"#0d2a26" },
+};
+
+const cleanGrants = (list) => list
+  .filter(g => g && g.id && g.title)
+  .map(g => ({ ...g, deadline: normalizeDate(g.deadline), category: g.category || "", source: g.source || "" }));
 
 export default function GrantTracker() {
   const [grants, setGrants]             = useState([]);
@@ -203,10 +213,12 @@ export default function GrantTracker() {
   const [lastUpdated, setLastUpdated]   = useState(null);
   const [expandedId, setExpandedId]     = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
-  const [windowMonths, setWindowMonths] = useState(3);
+  const [windowMonths, setWindowMonths] = useState(12);
   const [syncStatus, setSyncStatus]     = useState("idle");
   const [loading, setLoading]           = useState(true);
+  const [lastImport, setLastImport]     = useState("");
   const saveTimer = useRef(null);
+  const loadedAtRef = useRef(0); // server time of last sync; lets the backend protect rows auto-imported since then
 
   // Save -----------------------------------------------------------------
   const saveToSheet = useCallback((g) => {
@@ -217,12 +229,15 @@ export default function GrantTracker() {
       method: "POST",
       redirect: "follow",
       headers: { "Content-Type": "text/plain" },
-      body: JSON.stringify({ action: "save", grants: g }),
+      body: JSON.stringify({ action: "save", grants: g, loadedAt: loadedAtRef.current }),
     })
       .then(r => r.text())
       .then(text => {
         const data = JSON.parse(text);
         if (data.success) {
+          if (data.serverTime) loadedAtRef.current = data.serverTime;
+          // Server merged in rows the auto-importer added while this page was open
+          if (Array.isArray(data.grants)) setGrants(cleanGrants(data.grants));
           setSyncStatus("saved");
           setLastUpdated(new Date().toISOString());
           if (saveTimer.current) clearTimeout(saveTimer.current);
@@ -249,10 +264,10 @@ export default function GrantTracker() {
       .then(r => r.text())
       .then(text => {
         const data = JSON.parse(text);
+        if (data.serverTime) loadedAtRef.current = data.serverTime;
+        if (data.meta && data.meta.lastImport) setLastImport(data.meta.lastImport);
         if (data.success && Array.isArray(data.grants) && data.grants.length > 0) {
-          const clean = data.grants
-            .filter(g => g && g.id && g.title)
-            .map(g => ({ ...g, deadline: normalizeDate(g.deadline), category: g.category || "" }));
+          const clean = cleanGrants(data.grants);
           setGrants(clean.length > 0 ? clean : sampleGrants);
           setLastUpdated(new Date().toISOString());
         } else {
@@ -279,7 +294,7 @@ export default function GrantTracker() {
     setForm(emptyForm); setShowForm(false); setEditingId(null);
   };
   const handleEdit      = (g) => { setForm({...g}); setEditingId(g.id); setShowForm(true); setExpandedId(null); };
-  const handleDuplicate = (g) => { setForm({...g, id:Date.now().toString(), title:g.title+" (Copy)", deadline:""}); setEditingId(null); setShowForm(true); setExpandedId(null); };
+  const handleDuplicate = (g) => { setForm({...g, id:Date.now().toString(), title:g.title+" (Copy)", deadline:"", source:""}); setEditingId(null); setShowForm(true); setExpandedId(null); };
   const handleDelete    = (id) => { const u = grants.filter(g => g.id !== id); setGrants(u); saveToSheet(u); setConfirmDelete(null); };
 
   // Derived --------------------------------------------------------------
@@ -359,6 +374,7 @@ export default function GrantTracker() {
               {!loading && syncStatus==="saved"  && <span style={{ color:"#6aaa64"  }}>&#10003; Saved</span>}
               {!loading && syncStatus==="error"  && <span style={{ color:"#ff6b6b"  }}>&#9888; Save failed</span>}
               {!loading && syncStatus==="idle" && lastUpdated && <span style={{ color:"#4a7a9b" }}>Synced {new Date(lastUpdated).toLocaleTimeString()}</span>}
+              {!loading && lastImport && <span style={{ color:"#4a7a9b" }} title="New opportunities are imported automatically each night">· Auto-updated {new Date(lastImport).toLocaleDateString("en-US",{ month:"short", day:"numeric" })}</span>}
             </div>
           </div>
         </div>
@@ -405,6 +421,11 @@ export default function GrantTracker() {
                       {cs && (
                         <div style={{ background:cs.bg, border:"1px solid "+cs.color+"55", borderRadius:6, padding:"3px 10px", fontSize:11, color:cs.color, whiteSpace:"nowrap" }}>
                           {grant.category}
+                        </div>
+                      )}
+                      {sourceBadges[grant.source] && (
+                        <div title={sourceBadges[grant.source].title} style={{ background:sourceBadges[grant.source].bg, border:"1px solid "+sourceBadges[grant.source].color+"55", borderRadius:6, padding:"3px 10px", fontSize:11, color:sourceBadges[grant.source].color, whiteSpace:"nowrap" }}>
+                          {sourceBadges[grant.source].label}
                         </div>
                       )}
                       <div style={{ flex:1, minWidth:200 }}>
